@@ -64,7 +64,8 @@ type UpdateCollection struct {
 
 type ForkCollection struct {
 	SourceCollectionID   types.UniqueID
-	TargetCollectionName *string
+	TargetCollectionID   types.UniqueID
+	TargetCollectionName string
 }
 
 type FlushCollectionCompaction struct {
