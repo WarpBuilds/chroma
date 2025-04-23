@@ -6,4 +6,5 @@ on:
       - main
 jobs:
   test:
+    name: JavaScript client tests with WarpBuild
     uses: ./.github/workflows/_javascript-client-tests.yml
