@@ -1,0 +1,63 @@
+diff a/rust/load/src/data_sets.rs b/rust/load/src/data_sets.rs	(rejected hunks)
+@@ -1,3 +1,5 @@
++use std::cmp::Reverse;
++use std::collections::BinaryHeap;
+ use std::sync::atomic::AtomicUsize;
+ use std::sync::Arc;
+ 
+@@ -5,7 +7,9 @@ use chromadb::collection::{CollectionEntries, GetOptions, GetResult, QueryOption
+ use chromadb::ChromaClient;
+ use guacamole::combinators::*;
+ use guacamole::Guacamole;
++use tokio::sync::Mutex;
+ use tracing::Instrument;
++use tracing::{event, Level};
+ 
+ use crate::{bit_difference, DataSet, Error, GetQuery, KeySelector, QueryQuery, UpsertQuery};
+ 
+@@ -743,6 +747,10 @@ impl DataSet for ReferencingDataSet {
+         self.cardinality
+     }
+ 
++    fn reference_cardinality(&self) -> usize {
++        self.references.cardinality()
++    }
++
+     async fn get(
+         &self,
+         client: &ChromaClient,
+@@ -822,12 +830,12 @@ impl DataSet for ReferencingDataSet {
+         &self,
+         client: &ChromaClient,
+         uq: UpsertQuery,
+-        guac: &mut Guacamole,
++        _: &mut Guacamole,
+     ) -> Result<(), Box<dyn std::error::Error + Send>> {
+         let collection = client.get_collection(&self.operates_on).await?;
+         let mut keys = vec![];
+         for offset in 0..uq.batch_size {
+-            keys.push(uq.key.select_with_offset(guac, self, offset));
++            keys.push(uq.key.select_from_reference(self, offset));
+         }
+         let keys = keys.iter().map(|k| k.as_str()).collect::<Vec<_>>();
+         if let Some(res) = self.references.get_by_key(client, &keys).await? {
+@@ -1046,6 +1397,19 @@ pub fn all_data_sets() -> Vec<Arc<dyn DataSet>> {
+             }
+         }
+     }
++
++    let reference_data_set = Arc::new(TinyStoriesDataSet::new(TinyStoriesDataSetType::reference(
++        "reference",
++        ALL_MINILM_L6_V2,
++        1_000_000,
++    )));
++    data_sets.push(Arc::new(VerifyingDataSet {
++        reference_data_set,
++        test_data_set: "test-all-MiniLM-L6-v2".to_string(),
++        cardinality: AtomicUsize::new(0),
++        cardinality_heap: Arc::new(Mutex::new(BinaryHeap::new())),
++    }) as _);
++
+     data_sets
+ }
+ 
