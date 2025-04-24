@@ -90,62 +90,82 @@ jobs:
             for COMMIT in $COMMITS_TO_PICK; do
               echo "Processing commit: $(git log -1 --pretty="%h %s" $COMMIT)"
 
-              # Check if this commit only modifies workflow files
-              CHANGED_FILES=$(git diff-tree --no-commit-id --name-only -r $COMMIT)
-              NON_WORKFLOW_FILES=$(echo "$CHANGED_FILES" | grep -v "^.github/workflows/" || true)
+              # Safer approach: use git diff-tree to analyze commit changes
+              echo "Analyzing changes in commit $COMMIT"
+
+              # Get files modified in the commit, specifically identifying workflow files
+              ALL_CHANGED_FILES=$(git diff-tree --no-commit-id --name-only -r $COMMIT)
+              WORKFLOW_FILES=$(echo "$ALL_CHANGED_FILES" | grep "^.github/workflows/" || echo "")
+              NON_WORKFLOW_FILES=$(echo "$ALL_CHANGED_FILES" | grep -v "^.github/workflows/" || echo "")
 
               if [ -z "$NON_WORKFLOW_FILES" ]; then
                 echo "Commit only changes workflow files, skipping"
                 continue
               fi
 
-              # Get the commit message
+              echo "This commit changes non-workflow files, applying changes"
               COMMIT_MSG=$(git log -1 --pretty=format:"%s" $COMMIT)
 
-              # Cherry-pick non-interactive mode
-              if git cherry-pick --no-commit $COMMIT; then
-                # Successfully cherry-picked, now remove any workflow changes
-                echo "Cherry-pick succeeded, cleaning up workflow changes"
+              # Skip cherry-pick entirely and just apply directly with git apply
+              echo "Extracting non-workflow changes from commit"
 
-                if [ -d "$WORKFLOW_DIR" ]; then
-                  # Reset all workflow files to HEAD
-                  git checkout HEAD -- "$WORKFLOW_DIR/" || echo "Failed to reset workflow files"
+              # Create temporary directory for this operation
+              TMP_DIR=$(mktemp -d)
+              cd $TMP_DIR
 
-                  # Check for newly added workflow files from upstream
-                  for file in $(git ls-files --others --exclude-standard "$WORKFLOW_DIR/"); do
-                    echo "Removing new workflow file: $file"
-                    rm -f "$file"
-                  done
-                fi
+              # Initialize a git repo to use git apply
+              git init
 
-                # Commit the changes
-                git commit -m "$COMMIT_MSG" || {
-                  echo "No changes to commit after removing workflow files"
-                  git reset --hard HEAD
-                  continue
-                }
-              else
-                echo "Cherry-pick failed, trying manual approach"
-                git cherry-pick --abort
+              # Create a patch file for just the non-workflow files
+              for FILE in $NON_WORKFLOW_FILES; do
+                # Get the diff for this specific file from the commit
+                git -C $GITHUB_WORKSPACE diff-tree -p $COMMIT -- "$FILE" > "${FILE##*/}.patch"
 
-                # Create a patch excluding workflow files
-                echo "Creating patch from $COMMIT excluding workflow files"
-                git format-patch -1 --stdout $COMMIT | grep -v "^diff --git a/.github/workflows/" | \
-                  grep -v "^--- a/.github/workflows/" | \
-                  grep -v "^+++ b/.github/workflows/" > /tmp/filtered-patch.patch
-
-                # Apply the filtered patch
-                if git apply --reject /tmp/filtered-patch.patch; then
-                  echo "Patch applied successfully"
-
-                  # Commit the changes
-                  git add -A
-                  git commit -m "$COMMIT_MSG" || echo "No changes to commit"
+                if [ -s "${FILE##*/}.patch" ]; then
+                  echo "Created patch for $FILE"
                 else
-                  echo "Patch application failed, skipping commit $COMMIT"
-                  git reset --hard HEAD
-                  continue
+                  echo "Warning: Empty patch for $FILE"
                 fi
+              done
+
+              # Go back to workspace
+              cd $GITHUB_WORKSPACE
+
+              # Apply each patch individually
+              for PATCH in $TMP_DIR/*.patch; do
+                if [ -f "$PATCH" ] && [ -s "$PATCH" ]; then
+                  echo "Applying patch: $PATCH"
+                  if git apply --reject "$PATCH" 2>/dev/null; then
+                    echo "Successfully applied patch"
+                  else
+                    echo "Failed to apply patch, trying with --ignore-whitespace"
+                    if git apply --reject --ignore-whitespace "$PATCH" 2>/dev/null; then
+                      echo "Successfully applied patch with whitespace ignored"
+                    else
+                      echo "Still failed to apply patch, trying with --3way"
+                      # For binary files, etc., just try to copy directly
+                      FILE_PATH=$(grep "^--- a/" "$PATCH" | head -1 | sed 's|^--- a/||')
+                      if [ -n "$FILE_PATH" ]; then
+                        echo "Trying to directly copy $FILE_PATH from commit"
+                        git show "$COMMIT:$FILE_PATH" > "$FILE_PATH" 2>/dev/null || echo "Failed to extract file"
+                      fi
+                    fi
+                  fi
+                fi
+              done
+
+              # Clean up temp dir
+              rm -rf $TMP_DIR
+
+              # Stage all changes
+              git add -A
+
+              # Commit changes
+              if git diff --staged --quiet; then
+                echo "No changes to commit"
+              else
+                git commit -m "$COMMIT_MSG"
+                echo "Committed changes from $COMMIT"
               fi
             done
 
