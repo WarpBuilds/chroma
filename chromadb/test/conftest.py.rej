@@ -1,0 +1,10 @@
+diff a/chromadb/test/conftest.py b/chromadb/test/conftest.py	(rejected hunks)
+@@ -56,7 +56,7 @@ if CURRENT_PRESET not in VALID_PRESETS:
+ 
+ hypothesis.settings.register_profile(
+     "base",
+-    deadline=45000,
++    deadline=90000,
+     suppress_health_check=[
+         hypothesis.HealthCheck.data_too_large,
+         hypothesis.HealthCheck.large_base_example,
