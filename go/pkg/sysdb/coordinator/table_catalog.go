@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"slices"
 	"time"
 
 	"github.com/chroma-core/chroma/go/pkg/common"
@@ -292,19 +291,15 @@ func (tc *Catalog) createCollectionImpl(txCtx context.Context, createCollection 
 	}
 
 	dbCollection := &dbmodel.Collection{
-		ID:                         createCollection.ID.String(),
-		Name:                       &createCollection.Name,
-		ConfigurationJsonStr:       &createCollection.ConfigurationJsonStr,
-		Dimension:                  createCollection.Dimension,
-		DatabaseID:                 databases[0].ID,
-		VersionFileName:            versionFileName,
-		Tenant:                     createCollection.TenantID,
-		Ts:                         ts,
-		LogPosition:                createCollection.LogPosition,
-		RootCollectionId:           createCollection.RootCollectionId,
-		TotalRecordsPostCompaction: createCollection.TotalRecordsPostCompaction,
-		SizeBytesPostCompaction:    createCollection.SizeBytesPostCompaction,
-		LastCompactionTimeSecs:     createCollection.LastCompactionTimeSecs,
+		ID:                   createCollection.ID.String(),
+		Name:                 &createCollection.Name,
+		ConfigurationJsonStr: &createCollection.ConfigurationJsonStr,
+		Dimension:            createCollection.Dimension,
+		DatabaseID:           databases[0].ID,
+		Ts:                   ts,
+		LogPosition:          0,
+		VersionFileName:      versionFileName,
+		Tenant:               createCollection.TenantID,
 	}
 
 	err = tc.metaDomain.CollectionDb(txCtx).Insert(dbCollection)
@@ -471,7 +466,7 @@ func (tc *Catalog) GetCollectionWithSegments(ctx context.Context, collectionID t
 	var segments []*model.Segment
 
 	err := tc.txImpl.Transaction(ctx, func(txCtx context.Context) error {
-		collections, e := tc.GetCollections(txCtx, collectionID, nil, "", "", nil, nil)
+		collections, e := tc.GetCollections(ctx, collectionID, nil, "", "", nil, nil)
 		if e != nil {
 			return e
 		}
@@ -483,7 +478,7 @@ func (tc *Catalog) GetCollectionWithSegments(ctx context.Context, collectionID t
 		}
 		collection = collections[0]
 
-		segments, e = tc.GetSegments(txCtx, types.NilUniqueID(), nil, nil, collectionID)
+		segments, e = tc.GetSegments(ctx, types.NilUniqueID(), nil, nil, collectionID)
 		if e != nil {
 			return e
 		}
@@ -818,179 +813,23 @@ func (tc *Catalog) UpdateCollection(ctx context.Context, updateCollection *model
 	return result, nil
 }
 
-func (tc *Catalog) getLineageFile(ctx context.Context, collection *model.Collection) (*coordinatorpb.CollectionLineageFile, error) {
-	if len(collection.LineageFileName) == 0 {
-		// There is no lineage file for the given collection
-		return &coordinatorpb.CollectionLineageFile{
-			Dependencies: []*coordinatorpb.CollectionVersionDependency{},
-		}, nil
-	}
-
-	return tc.s3Store.GetLineageFile(collection.LineageFileName)
-}
-
 func (tc *Catalog) ForkCollection(ctx context.Context, forkCollection *model.ForkCollection) (*model.Collection, []*model.Segment, error) {
 	log.Info("Forking collection", zap.String("sourceCollectionId", forkCollection.SourceCollectionID.String()), zap.String("targetCollectionName", forkCollection.TargetCollectionName))
 
+	var source_collection *model.Collection
+	var source_segments []*model.Segment
+
 	err := tc.txImpl.Transaction(ctx, func(txCtx context.Context) error {
 		var err error
-		var rootCollection *model.Collection
-		var rootCollectionID types.UniqueID
-		var rootCollectionIDStr string
-		var sourceCollection *model.Collection
-		var sourceSegments []*model.Segment
-		var newLineageFileFullName string
-
-		ts := time.Now().UTC()
-
-		sourceCollectionIDStr := forkCollection.SourceCollectionID.String()
-
-		// NOTE: We need to retrieve the source collection to get root collection id, then acquire locks on source and root collections in order to avoid deadlock.
-		// This step is because root collection id is always populated when the collection is created and is never modified.
-		sourceCollectionDb, err := tc.metaDomain.CollectionDb(txCtx).GetCollectionEntry(&sourceCollectionIDStr, nil)
-		if err != nil {
-			return err
-		}
-
-		if len(sourceCollectionDb.RootCollectionId) > 0 {
-			rootCollectionID, err = types.Parse(sourceCollectionDb.RootCollectionId)
-			if err != nil {
-				return err
-			}
-		} else {
-			rootCollectionID = forkCollection.SourceCollectionID
-		}
-		rootCollectionIDStr = rootCollectionID.String()
-
-		// Lock source and root collections in order
-		collectionsToLock := []string{sourceCollectionIDStr}
-		if rootCollectionID != forkCollection.SourceCollectionID {
-			collectionsToLock = append(collectionsToLock, rootCollectionIDStr)
-			slices.Sort(collectionsToLock)
-		}
-		for _, collectionID := range collectionsToLock {
-			err = tc.metaDomain.CollectionDb(txCtx).LockCollection(collectionID)
-			if err != nil {
-				return err
-			}
-		}
-
-		// Get source and root collections after they are locked
-		sourceCollection, sourceSegments, err = tc.GetCollectionWithSegments(txCtx, forkCollection.SourceCollectionID)
-		if err != nil {
-			return err
-		}
-		if rootCollectionID != forkCollection.SourceCollectionID {
-			limit := int32(1)
-			collections, err := tc.GetCollections(txCtx, rootCollectionID, nil, "", "", &limit, nil)
-			if err != nil {
-				return err
-			}
-			if len(collections) == 0 {
-				return common.ErrCollectionNotFound
-			}
-			rootCollection = collections[0]
-		} else {
-			rootCollection = sourceCollection
-		}
-		databases, err := tc.metaDomain.DatabaseDb(txCtx).GetDatabases(sourceCollection.TenantID, sourceCollection.DatabaseName)
-		if err != nil {
-			return err
-		}
-		if len(databases) == 0 {
-			return common.ErrDatabaseNotFound
-		}
-
-		databaseID := databases[0].ID
-
-		// Verify that the source collection log position is between the compaction offset (inclusive) and enumeration offset (inclusive)
-		// This check is necessary for next compaction to fetch the right logs
-		// This scenario could occur during fork because we will reach out to log service first to fork logs. For exampls:
-		// t0: Fork source collection in log with offset [200, 300] (i.e. compaction offset 200, enumeration offset 300)
-		// t1: User writes to source collection, compaction takes place, source collection log offset become [400, 500]
-		// t2: Fork source collection in sysdb, the latest source collection compaction offset is 400. If we add new logs, it will start after offset 300, and the data is lost after compaction.
-		latestSourceCompactionOffset := uint64(sourceCollection.LogPosition)
-		if forkCollection.SourceCollectionLogEnumerationOffset < latestSourceCompactionOffset || latestSourceCompactionOffset < forkCollection.SourceCollectionLogCompactionOffset {
-			return common.ErrCollectionLogPositionStale
-		}
-
-		// Create the new collection with source collection information
-		createCollection := &model.CreateCollection{
-			ID:                         forkCollection.TargetCollectionID,
-			Name:                       forkCollection.TargetCollectionName,
-			ConfigurationJsonStr:       sourceCollection.ConfigurationJsonStr,
-			Dimension:                  sourceCollection.Dimension,
-			Metadata:                   sourceCollection.Metadata,
-			GetOrCreate:                false,
-			TenantID:                   sourceCollection.TenantID,
-			DatabaseName:               sourceCollection.DatabaseName,
-			Ts:                         ts.Unix(),
-			LogPosition:                sourceCollection.LogPosition,
-			RootCollectionId:           rootCollectionIDStr,
-			TotalRecordsPostCompaction: sourceCollection.TotalRecordsPostCompaction,
-			SizeBytesPostCompaction:    sourceCollection.SizeBytesPostCompaction,
-			LastCompactionTimeSecs:     sourceCollection.LastCompactionTimeSecs,
-		}
-
-		createSegments := []*model.CreateSegment{}
-		flushFilePaths := []*model.FlushSegmentCompaction{}
-		for _, segment := range sourceSegments {
-			newSegmentID := types.NewUniqueID()
-			createSegment := &model.CreateSegment{
-				ID:           newSegmentID,
-				Type:         segment.Type,
-				Scope:        segment.Scope,
-				CollectionID: forkCollection.TargetCollectionID,
-				Metadata:     segment.Metadata,
-				Ts:           ts.Unix(),
-			}
-			createSegments = append(createSegments, createSegment)
-			flushFilePath := &model.FlushSegmentCompaction{
-				ID:        newSegmentID,
-				FilePaths: segment.FilePaths,
-			}
-			flushFilePaths = append(flushFilePaths, flushFilePath)
-		}
-
-		_, _, err = tc.CreateCollectionAndSegments(txCtx, createCollection, createSegments, ts.Unix())
-		if err != nil {
-			return err
-		}
-
-		err = tc.metaDomain.SegmentDb(txCtx).RegisterFilePaths(flushFilePaths)
-		if err != nil {
-			return err
-		}
-
-		// Update the lineage file
-		lineageFile, err := tc.getLineageFile(txCtx, rootCollection)
-		if err != nil {
-			return err
-		}
-		// NOTE: This is a temporary hardcoded limit for the size of the lineage file
-		// TODO: Load the limit value from quota / scorecard, and/or improve the lineage file design to avoid large lineage file
-		if len(lineageFile.Dependencies) > 1000000 {
-			return common.ErrCollectionTooManyFork
-		}
-		lineageFile.Dependencies = append(lineageFile.Dependencies, &coordinatorpb.CollectionVersionDependency{
-			SourceCollectionId:      sourceCollectionIDStr,
-			SourceCollectionVersion: uint64(sourceCollection.Version),
-			TargetCollectionId:      forkCollection.TargetCollectionID.String(),
-		})
-
-		newLineageFileBaseName := fmt.Sprintf("%s/%d/%s.binpb", sourceCollectionIDStr, sourceCollection.Version, forkCollection.TargetCollectionID)
-		newLineageFileFullName, err = tc.s3Store.PutLineageFile(rootCollection.TenantID, databaseID, rootCollectionIDStr, newLineageFileBaseName, lineageFile)
-		if err != nil {
-			return err
-		}
-
-		return tc.metaDomain.CollectionDb(txCtx).UpdateCollectionLineageFilePath(rootCollectionIDStr, rootCollection.LineageFileName, newLineageFileFullName)
+		source_collection, source_segments, err = tc.GetCollectionWithSegments(ctx, forkCollection.SourceCollectionID)
+		return err
 	})
 	if err != nil {
 		return nil, nil, err
 	}
 
-	return tc.GetCollectionWithSegments(ctx, forkCollection.TargetCollectionID)
+	// TODO: Implement forking logic
+	return source_collection, source_segments, nil
 }
 
 func (tc *Catalog) CreateSegment(ctx context.Context, createSegment *model.CreateSegment, ts types.Timestamp) (*model.Segment, error) {
@@ -1309,7 +1148,7 @@ func (tc *Catalog) ListCollectionVersions(ctx context.Context,
 		zap.Int64("version", int64(collectionEntry.Version)),
 		zap.String("version_file_name", collectionEntry.VersionFileName))
 
-	versionFile, err := tc.s3Store.GetVersionFile(collectionEntry.VersionFileName)
+	versionFile, err := tc.s3Store.GetVersionFile(tenantID, collectionID.String(), int64(collectionEntry.Version), collectionEntry.VersionFileName)
 	if err != nil {
 		log.Error("error getting version file", zap.Error(err))
 		return nil, err
@@ -1550,7 +1389,7 @@ func (tc *Catalog) FlushCollectionCompactionForVersionedCollection(ctx context.C
 			}
 		} else {
 			// Read the VersionFile from S3MetaStore.
-			existingVersionFilePb, err = tc.s3Store.GetVersionFile(existingVersionFileName)
+			existingVersionFilePb, err = tc.s3Store.GetVersionFile(flushCollectionCompaction.TenantID, flushCollectionCompaction.ID.String(), existingVersion, existingVersionFileName)
 			if err != nil {
 				return nil, err
 			}
@@ -1745,7 +1584,7 @@ func (tc *Catalog) markVersionForDeletionInSingleCollection(
 		// TODO(rohit): log error if collection in file is different from the one in request.
 
 		existingVersionFileName := collectionEntry.VersionFileName
-		versionFilePb, err := tc.s3Store.GetVersionFile(existingVersionFileName)
+		versionFilePb, err := tc.s3Store.GetVersionFile(tenantID, collectionID, int64(collectionEntry.Version), existingVersionFileName)
 		if err != nil {
 			return err
 		}
@@ -1869,7 +1708,7 @@ func (tc *Catalog) DeleteVersionEntriesForCollection(ctx context.Context, tenant
 		}
 
 		existingVersionFileName := collectionEntry.VersionFileName
-		versionFilePb, err := tc.s3Store.GetVersionFile(existingVersionFileName)
+		versionFilePb, err := tc.s3Store.GetVersionFile(tenantID, collectionID, int64(collectionEntry.Version), existingVersionFileName)
 		if err != nil {
 			return err
 		}
