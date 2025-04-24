@@ -72,69 +72,159 @@ jobs:
 
             echo "Found $BEHIND_COUNT commits to sync from upstream"
 
-            # Create a temporary directory to work in
-            TEMP_DIR=$(mktemp -d)
-            echo "Working in temporary directory: $TEMP_DIR"
+            # Improved approach using patch-based strategy to avoid conflicts with workflow files
 
-            # Clone current repo to temp directory
-            git clone . $TEMP_DIR
-            cd $TEMP_DIR
+            # Create a temporary branch to work on
+            git checkout -b temp-sync-branch
 
-            # Setup git config in temp directory
-            git config user.name '${{ steps.app-token.outputs.app-slug }}[bot]'
-            git config user.email '${{ steps.get-user-id.outputs.user-id }}+${{ steps.app-token.outputs.app-slug }}[bot]@users.noreply.github.com'
+            # Get list of all .github/workflows files we want to preserve
+            WORKFLOW_FILES=$(find .github/workflows -type f -name "*.yml" -o -name "*.yaml" | sort)
+            echo "Preserving these workflow files: $WORKFLOW_FILES"
 
-            # Add upstream remote
-            git remote add upstream $UPSTREAM_INFO
-            git fetch upstream
-
-            # Create a list of commits to cherry-pick
-            COMMITS_TO_PICK=$(git rev-list --reverse HEAD..upstream/$branch_name)
-
-            # Process each commit
-            for COMMIT in $COMMITS_TO_PICK; do
-              echo "Processing commit: $COMMIT"
-              COMMIT_MSG=$(git log -1 --pretty=format:"%s" $COMMIT)
-
-              # Get list of files changed in this commit, excluding workflow files
-              FILES_CHANGED=$(git diff-tree --no-commit-id --name-only -r $COMMIT | grep -v "^.github/workflows/")
-
-              if [ -z "$FILES_CHANGED" ]; then
-                echo "Commit only changes workflow files, skipping"
-                continue
+            # Backup these workflow files
+            BACKUP_DIR=$(mktemp -d)
+            for file in $WORKFLOW_FILES; do
+              if [ -f "$file" ]; then
+                mkdir -p "$BACKUP_DIR/$(dirname $file)"
+                cp "$file" "$BACKUP_DIR/$file"
+                echo "Backed up $file"
               fi
-
-              # Cherry-pick but only apply non-workflow changes
-              git cherry-pick -n $COMMIT
-
-              # Reset any workflow file changes
-              git checkout HEAD -- .github/workflows/
-
-              # Commit the changes with original commit message
-              git commit -m "$COMMIT_MSG" || {
-                echo "No changes to commit (possibly only workflow changes)"
-                git reset --hard HEAD
-                continue
-              }
             done
 
-            # Go back to original directory
-            cd -
+            # Now try to merge upstream changes
+            echo "Merging upstream changes..."
+            if git merge upstream/$branch_name -m "Merge upstream changes"; then
+              echo "Merge successful"
+            else
+              # If there are conflicts in workflow files, resolve by keeping ours
+              echo "Merge had conflicts, resolving automatically..."
 
-            # If there are new commits in the temp repo, apply them to our repo
-            if [ "$(git -C $TEMP_DIR rev-list --count HEAD..)" -gt 0 ]; then
-              echo "Applying synced commits to original repo"
-              git -C $TEMP_DIR format-patch origin/$branch_name..HEAD --stdout | git am -3
+              # First, check if any workflow files are in conflict
+              CONFLICTED_WORKFLOWS=$(git diff --name-only --diff-filter=U | grep "^.github/workflows/")
+
+              if [ -n "$CONFLICTED_WORKFLOWS" ]; then
+                echo "Conflicts detected in workflow files: $CONFLICTED_WORKFLOWS"
+
+                # Abort the merge
+                git merge --abort
+
+                # Try a different approach with cherry-picking
+                echo "Trying cherry-picking approach instead"
+
+                # Reset to our branch
+                git reset --hard origin/$branch_name
+
+                # Get list of commits to cherry-pick
+                COMMITS_TO_PICK=$(git rev-list --reverse HEAD..upstream/$branch_name)
+
+                for COMMIT in $COMMITS_TO_PICK; do
+                  echo "Processing commit: $COMMIT"
+                  COMMIT_MSG=$(git log -1 --pretty=format:"%s" $COMMIT)
+
+                  # Check if this commit only modifies workflow files
+                  CHANGED_FILES=$(git diff-tree --no-commit-id --name-only -r $COMMIT)
+                  NON_WORKFLOW_FILES=$(echo "$CHANGED_FILES" | grep -v "^.github/workflows/" || true)
+
+                  if [ -z "$NON_WORKFLOW_FILES" ]; then
+                    echo "Commit only changes workflow files, skipping"
+                    continue
+                  fi
+
+                  # Try cherry-picking
+                  if ! git cherry-pick -n $COMMIT; then
+                    echo "Cherry-pick had conflicts, resolving..."
+
+                    # Check for conflicted workflow files
+                    CONFLICTED_FILES=$(git diff --name-only --diff-filter=U | grep "^.github/workflows/" || true)
+
+                    if [ -n "$CONFLICTED_FILES" ]; then
+                      # Keep our version of workflow files
+                      for file in $CONFLICTED_FILES; do
+                        echo "Keeping our version of $file"
+                        git checkout --ours -- "$file"
+                        git add "$file"
+                      done
+                    fi
+
+                    # For any remaining conflicts, manually resolve
+                    if [ -n "$(git diff --name-only --diff-filter=U)" ]; then
+                      echo "Non-workflow conflicts detected, attempting to resolve..."
+
+                      # Try to resolve by taking ours for deleted files
+                      for file in $(git diff --name-only --diff-filter=U); do
+                        if [ ! -f "$file" ]; then
+                          echo "File was deleted in our version, keeping deletion: $file"
+                          git rm "$file"
+                        fi
+                      done
+
+                      # If there are still conflicts, abort
+                      if [ -n "$(git diff --name-only --diff-filter=U)" ]; then
+                        echo "Unable to automatically resolve all conflicts, aborting"
+                        git cherry-pick --abort
+                        continue
+                      fi
+                    fi
+
+                    # Continue with the cherry-pick
+                    git cherry-pick --continue
+                  else
+                    # Reset any workflow file changes
+                    for file in $(git diff --name-only | grep "^.github/workflows/" || true); do
+                      echo "Resetting workflow file changes: $file"
+                      git checkout HEAD^ -- "$file"
+                      git add "$file"
+                    done
+
+                    # Commit the changes
+                    git commit --amend -m "$COMMIT_MSG" || echo "No changes to commit"
+                  fi
+                done
+              else
+                echo "Conflicts in non-workflow files, manual resolution needed"
+                git merge --abort
+                git reset --hard origin/$branch_name
+                echo "Sync failed due to non-workflow file conflicts"
+                return 1
+              fi
+            fi
+
+            # Restore our workflow files
+            for file in $WORKFLOW_FILES; do
+              if [ -f "$BACKUP_DIR/$file" ]; then
+                echo "Restoring $file"
+                cp "$BACKUP_DIR/$file" "$file"
+                git add "$file"
+              elif [ -f "$file" ]; then
+                # File exists but wasn't in our backup, meaning it came from upstream
+                # We want to keep our state, so remove it
+                echo "Removing upstream workflow file: $file"
+                git rm -f "$file"
+              fi
+            done
+
+            # Commit the workflow file restorations if needed
+            if ! git diff --staged --quiet; then
+              git commit -m "Preserve our workflow files"
+            fi
+
+            # Check if we have changes to push
+            if git rev-list --count origin/$branch_name..HEAD > 0; then
+              # Switch back to original branch and merge changes
+              git checkout $branch_name
+              git merge --ff-only temp-sync-branch
 
               # Push changes to origin
               git push origin $branch_name
               echo "Pushed synced changes to origin"
             else
-              echo "No non-workflow changes to apply"
+              git checkout $branch_name
+              echo "No changes to push"
             fi
 
             # Clean up
-            rm -rf $TEMP_DIR
+            git branch -D temp-sync-branch
+            rm -rf $BACKUP_DIR
           }
 
           # ----- Sync current branch -----
