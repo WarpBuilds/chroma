@@ -1,0 +1,23 @@
+diff a/rust/log-service/src/lib.rs b/rust/log-service/src/lib.rs	(rejected hunks)
+@@ -18,6 +18,7 @@ use chroma_types::chroma_proto::{
+     PushLogsRequest, PushLogsResponse, ScoutLogsRequest, ScoutLogsResponse,
+     UpdateCollectionLogOffsetRequest, UpdateCollectionLogOffsetResponse,
+ };
++use chroma_types::chroma_proto::{ForkLogsRequest, ForkLogsResponse};
+ use chroma_types::CollectionUuid;
+ use figment::providers::{Env, Format, Yaml};
+ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+@@ -763,6 +764,13 @@ impl LogService for LogServer {
+         .await
+     }
+ 
++    async fn fork_logs(
++        &self,
++        _request: Request<ForkLogsRequest>,
++    ) -> Result<Response<ForkLogsResponse>, Status> {
++        unimplemented!("Log forking is unimplemented for WAL3 for now")
++    }
++
+     #[tracing::instrument(info, skip(self, request), err(Display))]
+     async fn get_all_collection_info_to_compact(
+         &self,

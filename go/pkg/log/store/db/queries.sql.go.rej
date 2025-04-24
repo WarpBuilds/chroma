@@ -1,0 +1,12 @@
+diff a/go/pkg/log/store/db/queries.sql.go b/go/pkg/log/store/db/queries.sql.go	(rejected hunks)
+@@ -103,9 +120,7 @@ func (q *Queries) GetAllCollectionsToCompact(ctx context.Context, minCompactionS
+ }
+ 
+ const getBoundsForCollection = `-- name: GetBoundsForCollection :one
+-SELECT
+-	COALESCE(record_compaction_offset_position, 0) AS record_compaction_offset_position,
+-	COALESCE(record_enumeration_offset_position, 0) AS record_enumeration_offset_position
++SELECT record_compaction_offset_position, record_enumeration_offset_position
+ FROM collection
+ WHERE id = $1
+ `

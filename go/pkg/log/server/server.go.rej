@@ -1,0 +1,10 @@
+diff a/go/pkg/log/server/server.go b/go/pkg/log/server/server.go	(rejected hunks)
+@@ -56,7 +56,7 @@ func (s *logServer) ScoutLogs(ctx context.Context, req *logservicepb.ScoutLogsRe
+ 		return
+ 	}
+ 	// +1 to convert from the (] bound to a [) bound.
+-	res = &logservicepb.ScoutLogsResponse {
++	res = &logservicepb.ScoutLogsResponse{
+ 		FirstUninsertedRecordOffset: int64(limit + 1),
+ 	}
+ 	return
