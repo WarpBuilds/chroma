@@ -175,29 +175,39 @@ impl ZipfCache {
     }
 }
 
-////////////////////////////////////////////// Connection /////////////////////////////////////////////
-
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-pub struct Connection {
-    pub url: String,
-    pub api_key: String,
-    pub database: String,
-}
-
 ////////////////////////////////////////////// client //////////////////////////////////////////////
 
-/// Instantiate a new Chroma client.
-pub async fn client(connection: Connection) -> ChromaClient {
-    ChromaClient::new(ChromaClientOptions {
-        url: Some(connection.url.clone()),
-        auth: ChromaAuthMethod::TokenAuth {
-            token: connection.api_key.clone(),
-            header: ChromaTokenHeader::XChromaToken,
-        },
-        database: connection.database.clone(),
-    })
-    .await
-    .unwrap()
+/// Instantiate a new Chroma client.  This will use the CHROMA_HOST environment variable (or
+/// http://localhost:8000 when unset) as the argument to [client_for_url].
+pub async fn client() -> ChromaClient {
+    let url = std::env::var("CHROMA_HOST").unwrap_or_else(|_| "http://localhost:8000".into());
+    client_for_url(url).await
+}
+
+/// Create a new Chroma client for the given URL.  This will use the CHROMA_TOKEN environment
+/// variable if set, or no authentication if unset.
+pub async fn client_for_url(url: String) -> ChromaClient {
+    if let Ok(auth) = std::env::var("CHROMA_TOKEN") {
+        let db = std::env::var("CHROMA_DATABASE").unwrap_or_else(|_| "hf-tiny-stories".into());
+        ChromaClient::new(ChromaClientOptions {
+            url: Some(url),
+            auth: ChromaAuthMethod::TokenAuth {
+                token: auth,
+                header: ChromaTokenHeader::XChromaToken,
+            },
+            database: db,
+        })
+        .await
+        .unwrap()
+    } else {
+        ChromaClient::new(ChromaClientOptions {
+            url: Some(url),
+            auth: ChromaAuthMethod::None,
+            database: "default_database".to_string(),
+        })
+        .await
+        .unwrap()
+    }
 }
 
 ////////////////////////////////////////////// DataSet /////////////////////////////////////////////
@@ -922,15 +932,14 @@ impl PartialEq for Throughput {
 
 ////////////////////////////////////////// RunningWorkload /////////////////////////////////////////
 
-/// A running workload is a workload that has been bound to a data set and connection at a given
-/// throughput.  It is assigned a name, uuid, and expiration time.
+/// A running workload is a workload that has been bound to a data set at a given throughput.  It
+/// is assigned a name, uuid, and expiration time.
 #[derive(Clone, Debug)]
 pub struct RunningWorkload {
     uuid: Uuid,
     name: String,
     workload: Workload,
     data_set: Arc<dyn DataSet>,
-    connection: Connection,
     expires: chrono::DateTime<chrono::FixedOffset>,
     throughput: Throughput,
 }
@@ -950,7 +959,6 @@ impl From<WorkloadSummary> for Option<RunningWorkload> {
                 name: s.name,
                 workload: s.workload,
                 data_set,
-                connection: s.connection,
                 expires: s.expires,
                 throughput: s.throughput,
             })
@@ -986,8 +994,6 @@ pub struct WorkloadSummary {
     pub workload: Workload,
     /// The data set the workload is bound to.
     pub data_set: serde_json::Value,
-    /// The connection to use.
-    pub connection: Connection,
     /// The expiration time of the workload.
     pub expires: chrono::DateTime<chrono::FixedOffset>,
     /// The throughput of the workload.
@@ -1001,7 +1007,6 @@ impl From<RunningWorkload> for WorkloadSummary {
             name: r.name,
             workload: r.workload,
             data_set: r.data_set.json(),
-            connection: r.connection,
             expires: r.expires,
             throughput: r.throughput,
         }
@@ -1036,7 +1041,6 @@ impl LoadHarness {
         name: String,
         workload: Workload,
         data_set: &Arc<dyn DataSet>,
-        connection: Connection,
         expires: chrono::DateTime<chrono::FixedOffset>,
         throughput: Throughput,
     ) -> Uuid {
@@ -1047,7 +1051,6 @@ impl LoadHarness {
             name,
             workload,
             data_set,
-            connection,
             expires,
             throughput,
         });
@@ -1177,9 +1180,8 @@ impl LoadService {
     pub fn start(
         &self,
         name: String,
-        mut workload: Workload,
         data_set: String,
-        connection: Connection,
+        mut workload: Workload,
         expires: chrono::DateTime<chrono::FixedOffset>,
         throughput: Throughput,
     ) -> Result<Uuid, Error> {
@@ -1190,14 +1192,7 @@ impl LoadService {
         let res = {
             // SAFETY(rescrv):  Mutex poisoning.
             let mut harness = self.harness.lock().unwrap();
-            Ok(harness.start(
-                name,
-                workload.clone(),
-                data_set,
-                connection,
-                expires,
-                throughput,
-            ))
+            Ok(harness.start(name, workload.clone(), data_set, expires, throughput))
         };
         self.save_persistent()?;
         res
@@ -1279,7 +1274,7 @@ impl LoadService {
         inhibit: Arc<AtomicBool>,
         spec: RunningWorkload,
     ) {
-        let client = Arc::new(client(spec.connection.clone()).await);
+        let client = Arc::new(client().await);
         let mut guac = Guacamole::new(spec.expires.timestamp_millis() as u64);
         let mut next_op = Instant::now();
         let (tx, mut rx) = tokio::sync::mpsc::channel(1000);
@@ -1632,9 +1627,8 @@ async fn start(
         .map_err(|err| Error::InvalidRequest(format!("could not parse rfc3339: {err:?}")))?;
     let uuid = state.load.start(
         req.name,
-        req.workload,
         req.data_set,
-        req.connection,
+        req.workload,
         expires,
         req.throughput,
     )?;
@@ -1732,13 +1726,8 @@ mod tests {
         let load = LoadService::default();
         load.start(
             "foo".to_string(),
-            Workload::ByName("get-no-filter".to_string()),
             "nop".to_string(),
-            Connection {
-                url: "http://localhost:8000".to_string(),
-                api_key: "".to_string(),
-                database: "".to_string(),
-            },
+            Workload::ByName("get-no-filter".to_string()),
             (chrono::Utc::now() + chrono::Duration::seconds(10)).into(),
             Throughput::Constant(1.0),
         )
@@ -1844,13 +1833,8 @@ mod tests {
             .unwrap();
         load.start(
             "foo".to_string(),
-            Workload::ByName("get-no-filter".to_string()),
             "nop".to_string(),
-            Connection {
-                url: "http://localhost:8000".to_string(),
-                api_key: "".to_string(),
-                database: "".to_string(),
-            },
+            Workload::ByName("get-no-filter".to_string()),
             (chrono::Utc::now() + chrono::Duration::seconds(10)).into(),
             Throughput::Constant(1.0),
         )
