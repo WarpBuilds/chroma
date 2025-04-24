@@ -158,7 +158,7 @@ func (store *S3MetaStore) GetLineageFile(lineageFileName string) (*coordinatorpb
 }
 
 func (store *S3MetaStore) GetLineageFilePath(tenantID string, databaseID string, collectionID string, versionFileName string) string {
-	return fmt.Sprintf(lineageFilesPathFormat,
+	return fmt.Sprintf(versionFilesPathFormat,
 		tenantID, databaseID, collectionID, versionFileName)
 }
 
