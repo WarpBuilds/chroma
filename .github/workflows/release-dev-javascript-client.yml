@@ -1,4 +1,4 @@
-name: Development Release JavaScript client
+name: 📦 Development Release JavaScript client
 
 on:
   push:
