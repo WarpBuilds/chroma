@@ -1,0 +1,47 @@
+diff a/docs/docs.trychroma.com/lib/content.ts b/docs/docs.trychroma.com/lib/content.ts	(rejected hunks)
+@@ -4,7 +4,6 @@ export interface AppPage {
+   id: string;
+   name: string;
+   slug?: string;
+-  path?: string;
+ }
+ 
+ export interface AppSection {
+@@ -31,10 +30,10 @@ export const getAllPages = (sidebarConfig: AppSection[], sectionId: string) => {
+ 
+   pages.push(
+     ...(section.pages?.map((page) => {
++      const pageSlug = `${section.id}/${page.id}`;
+       return {
+         ...page,
+-        slug: `${section.id}/${page.id}`,
+-        path: `./${page.slug}`,
++        slug: pageSlug,
+       };
+     }) || []),
+   );
+@@ -42,10 +41,10 @@ export const getAllPages = (sidebarConfig: AppSection[], sectionId: string) => {
+   section.subsections?.forEach((subsection) => {
+     pages.push(
+       ...(subsection.pages?.map((page) => {
++        const pageSlug = `${section.id}/${subsection.id}/${page.id}`;
+         return {
+           ...page,
+-          slug: `${section.id}/${subsection.id}/${page.id}`,
+-          path: `../${subsection.id}/${page.id}`,
++          slug: pageSlug,
+         };
+       }) || []),
+     );
+@@ -54,6 +53,11 @@ export const getAllPages = (sidebarConfig: AppSection[], sectionId: string) => {
+   return pages;
+ };
+ 
++// Helper function to convert slug to path
++export const slugToPath = (slug: string): string => {
++  return `/${slug}`;
++};
++
+ export const getPagePrevNext = (
+   slug: string[],
+   pages: AppPage[],
