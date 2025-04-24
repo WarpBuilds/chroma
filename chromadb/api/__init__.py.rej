@@ -1,0 +1,18 @@
+diff a/chromadb/api/__init__.py b/chromadb/api/__init__.py	(rejected hunks)
+@@ -636,6 +636,16 @@ class ServerAPI(BaseAPI, AdminAPI, Component):
+     ) -> None:
+         pass
+ 
++    @abstractmethod
++    def _fork(
++        self,
++        collection_id: UUID,
++        new_name: str,
++        tenant: str = DEFAULT_TENANT,
++        database: str = DEFAULT_DATABASE,
++    ) -> CollectionModel:
++        pass
++
+     @abstractmethod
+     @override
+     def _count(

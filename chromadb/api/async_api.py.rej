@@ -1,0 +1,18 @@
+diff a/chromadb/api/async_api.py b/chromadb/api/async_api.py	(rejected hunks)
+@@ -630,6 +630,16 @@ class AsyncServerAPI(AsyncBaseAPI, AsyncAdminAPI, Component):
+     ) -> None:
+         pass
+ 
++    @abstractmethod
++    async def _fork(
++        self,
++        collection_id: UUID,
++        new_name: str,
++        tenant: str = DEFAULT_TENANT,
++        database: str = DEFAULT_DATABASE,
++    ) -> CollectionModel:
++        pass
++
+     @abstractmethod
+     @override
+     async def _count(
