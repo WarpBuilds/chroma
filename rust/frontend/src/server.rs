@@ -916,7 +916,14 @@ async fn create_collection(
             c,
             server.config.frontend.default_knn_index,
         )?),
-        None => None,
+        None => Some(InternalCollectionConfiguration::try_from_config(
+            CollectionConfiguration {
+                hnsw: None,
+                spann: None,
+                embedding_function: None,
+            },
+            server.config.frontend.default_knn_index,
+        )?),
     };
 
     let request = CreateCollectionRequest::try_new(
@@ -1818,6 +1825,7 @@ impl Modify for ChromaTokenSecurityAddon {
         get_collection,
         update_collection,
         delete_collection,
+        fork_collection,
         collection_add,
         collection_update,
         collection_upsert,

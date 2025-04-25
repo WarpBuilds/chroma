@@ -1,0 +1,12 @@
+diff a/clients/js/packages/chromadb-core/src/types.ts b/clients/js/packages/chromadb-core/src/types.ts	(rejected hunks)
+@@ -214,6 +214,10 @@ export type ModifyCollectionParams = {
+   metadata?: CollectionMetadata;
+ };
+ 
++export type ForkCollectionParams = {
++  newName: string;
++};
++
+ export type BaseQueryParams = {
+   nResults?: PositiveInteger;
+   where?: Where;

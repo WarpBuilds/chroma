@@ -1,0 +1,7 @@
+diff a/rust/frontend/sample_configs/tilt_config.yaml b/rust/frontend/sample_configs/tilt_config.yaml	(rejected hunks)
+@@ -54,4 +54,4 @@ scorecard:
+ circuit_breaker:
+   requests: 1000
+ enable_span_indexing: true
+-default_knn_index: "hnsw"
++default_knn_index: "spann"
