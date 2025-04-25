@@ -916,14 +916,7 @@ async fn create_collection(
             c,
             server.config.frontend.default_knn_index,
         )?),
-        None => Some(InternalCollectionConfiguration::try_from_config(
-            CollectionConfiguration {
-                hnsw: None,
-                spann: None,
-                embedding_function: None,
-            },
-            server.config.frontend.default_knn_index,
-        )?),
+        None => None,
     };
 
     let request = CreateCollectionRequest::try_new(
