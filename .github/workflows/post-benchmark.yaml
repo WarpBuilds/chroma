@@ -2,7 +2,7 @@ name: Post Benchmark Data
 
 on:
   workflow_run:
-    workflows: ["Development Release JavaScript client"]
+    workflows: ["📦 Development Release JavaScript client"]
     types:
       - completed
     branches:
